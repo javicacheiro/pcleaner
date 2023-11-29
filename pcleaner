@@ -26,11 +26,6 @@ import argparse
 # Number of seconds to wait for the process to terminate before SIGKILL
 GRACE_TIME = 30
 
-# Processes from UIDs lower than this number are ignored
-IGNORED_UIDS = 1000
-
-IGNORED_USERS = ['saraiba', 'ibiop', 'sistemas', 'aplicaciones']
-
 
 def search(max_age=timedelta(hours=0), max_usage=timedelta(hours=0),
            max_percent=0, max_mem_gb=0, ignored_users=[], min_uid=1000):
@@ -83,6 +78,8 @@ def search(max_age=timedelta(hours=0), max_usage=timedelta(hours=0),
 
 def display(procs):
     """Display procs in stdout"""
+    if len(procs) == 0:
+        return
     print("{:<10} {:<50} {:<20} {:<20} {:<30} {:<20} {:<15} {:<20} {:<20}".format(
         "PID", "COMMAND", "USER", "EFFECTIVE UID", "CREATE TIME", "AGE (DAYS)", "CPU PERCENT", "RSS MEM (GB)", "CPU USAGE (HOURS)"))
     for p in procs:
@@ -112,6 +109,8 @@ def on_terminate(proc):
 def kill(procs):
     """Kill the given procs"""
     for p in procs:
+        # Process could exit because we killed its children so we check
+        # that it is still there
         if psutil.pid_exists(p.pid):
             logging.info('Terminating process: user %s name %s pid %s',
                         p.username(), p.name(), p.pid)
