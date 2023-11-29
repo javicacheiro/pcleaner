@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+""" Search for and clean lost processes
+
+Usage: pscleaner [OPTION]
+
+To see all available options look at the help
+
+    -h, --help  see options
+
+Examples:
+
+  Look for processes that have been around for more than 40 days:
+
+    pscleaner --age $((24*40))
+
+  Look for processes that have been around for more than 40 days and kill them:
+
+    pscleaner --age $((24*40)) --kill
+
+"""
+import logging
+import psutil
+from datetime import datetime, timedelta
+import argparse
+
+# Number of seconds to wait for the process to terminate before SIGKILL
+GRACE_TIME = 30
+
+# Processes from UIDs lower than this number are ignored
+IGNORED_UIDS = 1000
+
+IGNORED_USERS = ['saraiba', 'ibiop', 'sistemas', 'aplicaciones']
+
+
+def search(max_age=timedelta(hours=0), max_usage=timedelta(hours=0),
+           max_percent=0, max_mem_gb=0, ignored_users=[], min_uid=1000):
+    """Search for long running procs
+
+    We consider a long running process any process that satisfies ANY of
+    the following conditions (satisfying one is enough):
+
+    :param max_age: process has been running more than `max_age` (timedelta)
+    :param max_usage: process has used more than `max_usage` cpu (timedelta)
+    :param max_percent: process is consuming more than `max_percent` cpu (%)
+    :param max_mem_gb: process is consuming more than `max_memory` GB
+    :return: list of procs that satisfy the conditions
+    """
+    procs = psutil.process_iter(
+        attrs=['pid', 'name', 'username', 'uids', 'memory_info',
+               'create_time', 'cpu_percent', 'cpu_times'])
+    now = datetime.now()
+    found = []
+    for p in procs:
+        try:
+            user = p.info['username']
+            uid_effective = p.info['uids'].effective
+            uid_real = p.info['uids'].real
+            if (user in ignored_users or
+                uid_effective < min_uid or
+                uid_real < min_uid):
+                continue
+
+            create_time = datetime.fromtimestamp(p.info['create_time'])
+            age = now - create_time
+
+            cpu = p.info['cpu_times']
+            total_usage = cpu.user + cpu.system
+            usage = timedelta(seconds=total_usage)
+
+            percent = p.info['cpu_percent']
+
+            mem = p.info['memory_info'].rss
+            max_mem = max_mem_gb * 1024**3
+
+            if (age >= max_age and usage >= max_usage
+                and percent >= max_percent and mem > max_mem):
+                found.append(p)
+        except (psutil.NoSuchProcess, psutil.AccessDenied,
+                psutil.ZombieProcess):
+            pass
+    return found
+
+
+def display(procs):
+    """Display procs in stdout"""
+    print("{:<10} {:<50} {:<20} {:<20} {:<30} {:<20} {:<15} {:<20} {:<20}".format(
+        "PID", "COMMAND", "USER", "EFFECTIVE UID", "CREATE TIME", "AGE (DAYS)", "CPU PERCENT", "RSS MEM (GB)", "CPU USAGE (HOURS)"))
+    for p in procs:
+        create_time = datetime.fromtimestamp(p.info['create_time'])
+        create_time_str = create_time.strftime('%Y-%m-%d %H:%M:%S')
+        now = datetime.now()
+        age = now - create_time
+        cpu = p.info['cpu_times']
+        total_usage = cpu.user + cpu.system
+        usage = timedelta(seconds=total_usage)
+        print(f"{p.info['pid']:<10} "
+              f"{p.info['name']:<50} "
+              f"{p.info['username']:<20} "
+              f"{p.info['uids'].effective:<20} "
+              f"{create_time_str:<30} "
+              f"{age.total_seconds()/(24*3600):<20.1f} "
+              f"{p.info['cpu_percent']:<15} "
+              f"{p.info['memory_info'].rss/1024**3:<20.3f} "
+              f"{usage.total_seconds()/3600:<20.1f}")
+
+
+def on_terminate(proc):
+    logging.info('Process %s terminated with exit code %s',
+                    proc.pid, proc.returncode)
+
+
+def kill(procs):
+    """Kill the given procs"""
+    for p in procs:
+        if psutil.pid_exists(p.pid):
+            logging.info('Terminating process: user %s name %s pid %s',
+                        p.username(), p.name(), p.pid)
+            p.terminate()
+
+    logging.info('Waiting %s seconds for processes to terminate gracefuly',
+                 GRACE_TIME)
+    gone, alive = psutil.wait_procs(procs, timeout=GRACE_TIME,
+                                    callback=on_terminate)
+
+    for p in alive:
+        logging.info('Killing process: user %s name %s pid %s',
+                     p.username(), p.name(), p.pid)
+        p.kill()
+
+
+def main():
+    logging.basicConfig(format='%(levelname)s: %(message)s',
+                        level=logging.INFO)
+    logging.debug('Running pscleaner')
+
+    parser = argparse.ArgumentParser(description="process cleaner utility")
+    parser.add_argument("-a", "--age", type=int, default=0, help="Max process age in hours")
+    parser.add_argument("-u", "--usage", type=int, default=0, help="Max process accumulated cpu usage in hours")
+    parser.add_argument("-p", "--percent", type=int, default=0, help="Max process cpu percent usage (eg. 400)")
+    parser.add_argument("-m", "--memory", type=int, default=0, help="Max process memory usage in GB")
+    parser.add_argument("-s", "--skip", default='', help="List of users to skip separated by comma")
+    parser.add_argument("-x", "--min-uid", type=int, default=1000, help="Minimum user uid to consider (reserved system users)")
+    parser.add_argument("-k", "--kill", action='store_true', help="Kill found procs")
+    args = parser.parse_args()
+
+    ignored_users = args.skip.split(',')
+    min_uid = args.min_uid
+
+    max_age = timedelta(hours=args.age)
+    max_usage = timedelta(hours=args.usage)
+    max_percent = args.percent
+    max_mem_gb = args.memory
+    must_kill = args.kill
+
+    procs = search(max_age=max_age, max_usage=max_usage,
+                   max_percent=max_percent, max_mem_gb=max_mem_gb,
+                   ignored_users=ignored_users, min_uid=min_uid)
+    display(procs)
+
+    if must_kill:
+        kill(procs)
+
+
+if __name__ == "__main__":
+    main()
